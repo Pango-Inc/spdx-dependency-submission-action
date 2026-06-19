@@ -102996,8 +102996,13 @@ function getManifestFromSpdxFile(document, fileName) {
                 ...(document.documentDescribes || []),
                 ...(document.relationships || []).filter(r => r.relationshipType === "DESCRIBES").map(r => r.relatedSpdxElement),
             ]);
-            let relationships = document.relationships?.filter(rel => rel.relatedSpdxElement == pkg.SPDXID && rel.relationshipType == "DEPENDS_ON" && !rootSpdxIds.has(rel.spdxElementId));
-            if (relationships != null && relationships.length > 0) {
+            const dependers = (document.relationships || [])
+                .map(rel =>
+                    (rel.relationshipType === "DEPENDS_ON" && rel.relatedSpdxElement === pkg.SPDXID) ? rel.spdxElementId :
+                    (rel.relationshipType === "DEPENDENCY_OF" && rel.spdxElementId === pkg.SPDXID) ? rel.relatedSpdxElement :
+                    null)
+                .filter(depender => depender != null && !rootSpdxIds.has(depender));
+            if (dependers.length > 0) {
                 manifest.addIndirectDependency(new c(purl));
             } else {
                 manifest.addDirectDependency(new c(purl));
