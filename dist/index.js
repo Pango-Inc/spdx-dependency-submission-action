@@ -55286,6 +55286,36 @@ function getRootSpdxIds(document) {
 }
 
 /**
+ * Normalizes the document's dependency relationships into `dependent -> dependency` edges.
+ * SPDX defines `DEPENDENCY_OF` as the inverse of `DEPENDS_ON`
+ * (see https://spdx.github.io/spdx-spec/v2.3/relationships-between-SPDX-elements/), and generators
+ * are free to use either. Syft, for example, emits only `DEPENDENCY_OF`, so reading `DEPENDS_ON`
+ * alone would find no relationships at all and classify every package as a direct dependency.
+ *
+ * @param {Object} document - The SPDX document object containing package and relationship data.
+ * @returns {{dependent: string, dependency: string}[]} The dependency edges declared by the document.
+ */
+function getDependencyEdges(document) {
+    const edges = [];
+
+    for (const relationship of document.relationships ?? []) {
+        if (relationship.relationshipType === "DEPENDS_ON") {
+            edges.push({
+                dependent: relationship.spdxElementId,
+                dependency: relationship.relatedSpdxElement
+            });
+        } else if (relationship.relationshipType === "DEPENDENCY_OF") {
+            edges.push({
+                dependent: relationship.relatedSpdxElement,
+                dependency: relationship.spdxElementId
+            });
+        }
+    }
+
+    return edges;
+}
+
+/**
  * Extracts and constructs a manifest object from an SPDX document for a given file.
  * This function processes an SPDX document, iterating over its packages to construct a manifest.
  * It handles package information, including name, version, and package URLs (purls), and categorizes packages as direct or indirect dependencies based on their relationships.
@@ -55305,17 +55335,14 @@ function getManifestFromSpdxFile(document, fileName) {
     const packagesBySpdxId = new Map();
     const packageCache = new h();
     const rootSpdxIds = getRootSpdxIds(document);
+    const dependencyEdges = getDependencyEdges(document);
     const rootDependencies = new Set();
     const nonRootDependencies = new Set();
-    for (const relationship of document.relationships ?? []) {
-        if (relationship.relationshipType !== "DEPENDS_ON") {
-            continue;
-        }
-
-        const dependencies = rootSpdxIds.has(relationship.spdxElementId)
+    for (const edge of dependencyEdges) {
+        const dependencies = rootSpdxIds.has(edge.dependent)
             ? rootDependencies
             : nonRootDependencies;
-        dependencies.add(relationship.relatedSpdxElement);
+        dependencies.add(edge.dependency);
     }
 
     document.packages?.forEach(pkg => {
@@ -55361,16 +55388,13 @@ function getManifestFromSpdxFile(document, fileName) {
         }
     });
 
-    for (const relationship of document.relationships ?? []) {
-        if (
-            relationship.relationshipType !== "DEPENDS_ON" ||
-            rootSpdxIds.has(relationship.spdxElementId)
-        ) {
+    for (const edge of dependencyEdges) {
+        if (rootSpdxIds.has(edge.dependent)) {
             continue;
         }
 
-        const parent = packagesBySpdxId.get(relationship.spdxElementId);
-        const dependency = packagesBySpdxId.get(relationship.relatedSpdxElement);
+        const parent = packagesBySpdxId.get(edge.dependent);
+        const dependency = packagesBySpdxId.get(edge.dependency);
         if (
             parent &&
             dependency &&
