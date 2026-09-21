@@ -55259,6 +55259,33 @@ var dist_node = __nccwpck_require__(3708);
 const DO_NOT_RETRY_STATUSES = [400, 410, 422, 451];
 
 /**
+ * Collects the SPDX IDs that identify the root of the document.
+ * The root is what the document is about, so anything it depends on is a direct dependency.
+ * SPDX records this with `documentDescribes` and/or a `DESCRIBES` relationship
+ * (see https://spdx.github.io/spdx-spec/v2.3/document-creation-information/#116-document-describes-field),
+ * so a document is not required to name its root `SPDXRef-RootPackage`. That name is kept as a
+ * fallback for generators that rely on the convention without declaring what the document describes.
+ *
+ * @param {Object} document - The SPDX document object containing package and relationship data.
+ * @returns {Set<string>} The SPDX IDs to treat as roots of the document.
+ */
+function getRootSpdxIds(document) {
+    const rootSpdxIds = new Set(["SPDXRef-RootPackage"]);
+
+    for (const spdxId of document.documentDescribes ?? []) {
+        rootSpdxIds.add(spdxId);
+    }
+
+    for (const relationship of document.relationships ?? []) {
+        if (relationship.relationshipType === "DESCRIBES") {
+            rootSpdxIds.add(relationship.relatedSpdxElement);
+        }
+    }
+
+    return rootSpdxIds;
+}
+
+/**
  * Extracts and constructs a manifest object from an SPDX document for a given file.
  * This function processes an SPDX document, iterating over its packages to construct a manifest.
  * It handles package information, including name, version, and package URLs (purls), and categorizes packages as direct or indirect dependencies based on their relationships.
@@ -55277,6 +55304,7 @@ function getManifestFromSpdxFile(document, fileName) {
 
     const packagesBySpdxId = new Map();
     const packageCache = new h();
+    const rootSpdxIds = getRootSpdxIds(document);
     const rootDependencies = new Set();
     const nonRootDependencies = new Set();
     for (const relationship of document.relationships ?? []) {
@@ -55284,7 +55312,7 @@ function getManifestFromSpdxFile(document, fileName) {
             continue;
         }
 
-        const dependencies = relationship.spdxElementId === "SPDXRef-RootPackage"
+        const dependencies = rootSpdxIds.has(relationship.spdxElementId)
             ? rootDependencies
             : nonRootDependencies;
         dependencies.add(relationship.relatedSpdxElement);
@@ -55336,7 +55364,7 @@ function getManifestFromSpdxFile(document, fileName) {
     for (const relationship of document.relationships ?? []) {
         if (
             relationship.relationshipType !== "DEPENDS_ON" ||
-            relationship.spdxElementId === "SPDXRef-RootPackage"
+            rootSpdxIds.has(relationship.spdxElementId)
         ) {
             continue;
         }
