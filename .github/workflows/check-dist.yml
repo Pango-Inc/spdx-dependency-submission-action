@@ -3,6 +3,37 @@
 # `index.js` is the code that will run.
 # For our project, we generate this file through a build process from other source files.
 # We need to make sure the checked-in `index.js` actually matches what we expect it to be.
+#
+# dist/ only strictly needs to be correct at release time - release.yml's "bump-version" job
+# already rebuilds it unconditionally right before every version-bump PR. So this workflow always
+# runs (no path filter - a required status check must always report a status, or PRs that never
+# trigger it get stuck blocked forever waiting on a check that never arrives), but only actually
+# fails for the case that matters:
+#   - dist/ matches a fresh build                                -> success (green)
+#   - dist/ is stale, but this change isn't release-related      -> success (green), with a
+#                                                                    ::warning:: annotation and a
+#                                                                    Job Summary note - visible,
+#                                                                    but non-blocking
+#   - dist/ is stale AND this change touches .release.yml /      -> failure (red, blocks merge)
+#     release.yml / check-dist.yml itself
+#
+# This used to instead create a separate, custom Checks API check-run (named "check-dist",
+# distinct from this job) so the "stale but not release-relevant" case could render as a genuine
+# yellow "neutral" conclusion. That was abandoned: a check-run created via a raw `POST
+# /check-runs` call gets auto-assigned by GitHub to *some* active check_suite for the same app+SHA
+# - and since a pull_request event triggers many workflows concurrently under the same
+# "github-actions" app, that assignment is effectively a race. Confirmed live: the custom
+# check-run landed in an unrelated workflow's check_suite (CodeQL's, not this workflow's own), and
+# GitHub's required-status-check matching never recognized it as satisfying the requirement even
+# though the check-run itself showed conclusion:success/neutral/failure correctly - it stayed
+# stuck as "Expected - Waiting for status to be reported" indefinitely, confirmed NOT to be a
+# transient rendering/caching issue (persisted across multiple hard refreshes). There's no
+# parameter on the create-check-run API to control which check_suite it attaches to, so this
+# couldn't be fixed by adjusting that call.
+#
+# This job's own native status doesn't have that problem - it's correctly tied to its own
+# check_suite from creation, exactly like every other required check in this repo (test-action,
+# test-npm) - so mark *this* job ("check-dist") as the required status check.
 name: Check dist/
 permissions:
   contents: read
@@ -11,11 +42,7 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - '**.md'
   pull_request:
-    paths-ignore:
-      - '**.md'
   workflow_dispatch:
 
 jobs:
@@ -23,10 +50,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set Node.js latest
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: latest
 
@@ -36,18 +63,121 @@ jobs:
       - name: Rebuild the dist/ directory
         run: npm run prepare
 
+      # Deliberately doesn't exit 1 here - blocking is decided in the final step below, based on
+      # both staleness and release-relevance together.
+      # `git diff --quiet`: exits 1 as soon as it finds any difference, without needing to
+      # generate the full diff text just to count its lines (dist/index.js is ~1.8MB, so this
+      # matters). Safe under `set -e` here since it's the condition of an `if`.
       - name: Compare the expected and actual dist/ directories
-        run: |
-          if [ "$(git diff --ignore-space-at-eol dist/ | wc -l)" -gt "0" ]; then
-            echo "Detected uncommitted changes after build.  See status below:"
-            git diff
-            exit 1
-          fi
         id: diff
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet --ignore-space-at-eol -- dist/; then
+            echo "dist/ does not match a fresh build. See diff stat below:"
+            git diff --stat -- dist/
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dist/ matches a fresh build."
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      # If index.js was different than expected, upload the expected version as an artifact
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: ${{ failure() && steps.diff.conclusion == 'failure' }}
+      # If dist/ was different than expected, upload the expected version as an artifact -
+      # regardless of whether this ends up blocking, so either path can grab a correct dist/
+      # without needing to rebuild it themselves.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ steps.diff.outputs.stale == 'true' }}
         with:
           name: dist
           path: dist/
+
+      - name: Determine if this change touches release-relevant paths
+        id: relevant
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          case "${{ github.event_name }}" in
+            pull_request)
+              base="${{ github.event.pull_request.base.sha }}"
+              head="${{ github.event.pull_request.head.sha }}"
+              ;;
+            push)
+              base="${{ github.event.before }}"
+              head="${{ github.sha }}"
+              ;;
+            *)
+              # workflow_dispatch, etc. - no natural base to diff against; treat as relevant so a
+              # manual run always reports the fully-accurate, strict status.
+              echo "relevant=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          # All-zero SHA: new branch/first push, nothing to diff against.
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Compare API (not local git diff) so this doesn't depend on checkout fetch-depth.
+          # Fail safe toward "relevant=true" (the stricter path) if the API call itself fails.
+          if ! response=$(gh api "repos/${{ github.repository }}/compare/$base...$head" 2>&1); then
+            echo "::warning::Could not compute changed files via the compare API - treating this as release-relevant to be safe. Details: $response"
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The compare API silently caps its "files" array at 300 entries with no truncation
+          # flag - a diff with >=300 files might have release-relevant paths beyond what's
+          # returned. Fail safe toward "relevant=true" rather than risk missing a real problem on
+          # a change we can't fully see.
+          file_count=$(echo "$response" | jq '.files | length')
+          if [ "$file_count" -ge 300 ]; then
+            echo "::warning::Compare API returned $file_count changed files (possible truncation at its 300-file cap) - treating this as release-relevant to be safe."
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed_files=$(echo "$response" | jq -r '.files[].filename')
+          if echo "$changed_files" | grep -qE '^(\.release\.yml|\.github/workflows/(release|check-dist)\.yml)$'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Only fails the job (blocking merge, since "check-dist" is a required status check) when
+      # dist/ is genuinely stale AND this change touches release-relevant paths - a plain source
+      # PR that leaves dist/ stale gets a visible, non-blocking warning instead (both a
+      # ::warning:: annotation and a Job Summary note), since dist/ only needs to be correct at
+      # release time and release.yml's bump-version job rebuilds it automatically anyway.
+      - name: Evaluate dist/ staleness
+        env:
+          STALE: ${{ steps.diff.outputs.stale }}
+          RELEVANT: ${{ steps.relevant.outputs.relevant }}
+        run: |
+          set -euo pipefail
+
+          if [ "$STALE" = "false" ]; then
+            echo "### :white_check_mark: dist/ matches source" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ "$RELEVANT" = "true" ]; then
+            message='dist/ does not match a fresh build, and this change touches `.release.yml` or the release/check-dist workflows - dist/ **must** be correct here. Run `npm run prepare` and commit the result, or download the "dist" artifact from this run.'
+            echo "::error::dist/ is out of sync and this change is release-relevant - dist/ must be rebuilt (npm run prepare) and committed."
+            {
+              echo "### :x: dist/ is out of sync (release-relevant change)"
+              echo ""
+              echo "$message"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          message='dist/ does not match a fresh build. This is only a hard requirement at release time (`release.yml`'"'"'s bump-version job rebuilds dist/ automatically for every version bump), so this does not block merge - but if you want dist/ correct in this PR too, run `npm run prepare` and commit the result, or download the "dist" artifact from this run.'
+          echo "::warning::dist/ is out of sync, but this change isn't release-related, so this is non-blocking - it'll be rebuilt automatically at the next release bump."
+          {
+            echo "### :warning: dist/ is out of sync"
+            echo ""
+            echo "$message"
+          } >> "$GITHUB_STEP_SUMMARY"

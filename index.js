@@ -4,10 +4,12 @@ import { context } from '@actions/github';
 import * as toolkit from '@github/dependency-submission-toolkit';
 import * as lib from './lib/index.js';
 
-const VERSION = "0.1.1";
+const VERSION = "0.3.2";
 
 async function run() {
-  let manifests = lib.getManifestsFromSpdxFiles(lib.searchFiles());
+  const files = lib.searchFiles();
+  let manifests = lib.getManifestsFromSpdxFiles(files, core.getInput('manifestPath'));
+  const submissionContext = lib.getSubmissionContext(context, core.getInput('repoPath') || process.cwd());
 
   const correlator = core.getInput('correlator');
   let snapshot = new toolkit.Snapshot({
@@ -15,7 +17,7 @@ async function run() {
     version: VERSION,
     url: "https://github.com/advanced-security/spdx-dependency-submission-action",
   },
-    context,
+    submissionContext,
     {
       correlator: correlator,
       id: context.runId.toString()
@@ -25,7 +27,7 @@ async function run() {
     snapshot.addManifest(manifest);
   });
 
-  toolkit.submitSnapshot(snapshot);
+  await lib.submitSnapshot(snapshot, submissionContext);
 }
 
 run();

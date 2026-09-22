@@ -1,6 +1,6 @@
 # SPDX to Dependency Graph Action
 
-This repository makes it easy to upload an SPDX 2.2 formatted SBOM to GitHub's dependency submission API.
+This repository makes it easy to upload an SPDX 2.2 formatted SBOM to GitHub's dependency submission API, preserving `DEPENDS_ON` relationships between packages.
 This lets you quickly receive Dependabot alerts for package manifests which GitHub doesn't directly support like pnpm or Paket by using existing off-the-shelf SBOM generators.
 
 ## Example workflow
@@ -35,15 +35,57 @@ jobs:
         name: sbom
         path: _manifest/spdx_2.2
     - name: SBOM upload 
-      uses: advanced-security/spdx-dependency-submission-action@v0.2.0
+      uses: advanced-security/spdx-dependency-submission-action@v0.3.2
       with:
         filePath: "_manifest/spdx_2.2/"
 ```
 
-Add support for running inside a matrix by overriding the default correlater unique identifier to include the job+matrix values.  Consider these sample steps:
+### Customize the displayed manifest path
+
+Set `manifestPath` to override the path displayed for the manifest in GitHub's dependency graph. This does not change where the action reads the SPDX file from. Because manifest paths identify submissions, this input can only be used when `filePath` and `filePattern` match one SPDX file.
 
 ```yaml
-      # Format corrleator as "job(matrixvalue1, matrixvalue2, ... )" or just "job" with a null matrix
+    - name: SBOM upload
+      uses: advanced-security/spdx-dependency-submission-action@v0
+      with:
+        filePath: "${{ runner.temp }}/sbom_verification"
+        filePattern: "sbom.spdx.json"
+        manifestPath: "requirements.txt"
+```
+
+## Submit to another repository
+
+Set `repo` to submit the snapshot to a repository other than the one running the workflow. `owner` defaults to the workflow repository owner. When `repoSha` or `repoRef` is omitted, the action detects it from the checked-out repository at `repoPath`. Set `repoPath` when the target repository is checked out somewhere other than the Actions working directory.
+
+Provide `repoRef` explicitly when the target repository is checked out at a detached HEAD.
+
+This example assumes `target_sha` is provided as a workflow input.
+For a branch checkout at `repoPath`, `repoSha` and `repoRef` can be omitted and auto-detected.
+
+```yaml
+    - uses: actions/checkout@v4
+      with:
+        repository: my-org/target-repo
+        path: target-repo
+    - name: SBOM upload
+      uses: advanced-security/spdx-dependency-submission-action@v0
+      with:
+        filePath: target-repo/_manifest/spdx_2.2
+        filePattern: target-repo.spdx.json
+        token: ${{ secrets.TARGET_REPOSITORY_TOKEN }}
+        owner: my-org
+        repo: target-repo
+        repoPath: target-repo
+        repoSha: ${{ inputs.target_sha }}
+        repoRef: refs/heads/main
+```
+
+The token must have permission to submit dependency snapshots to the target repository.
+
+Add support for running inside a matrix by overriding the default correlator unique identifier to include the job+matrix values.  Consider these sample steps:
+
+```yaml
+      # Format correlator as "job(matrixvalue1, matrixvalue2, ... )" or just "job" with a null matrix
       - name: Define correlator
         id: matrix_parser
         run: |
@@ -51,7 +93,7 @@ Add support for running inside a matrix by overriding the default correlater uni
             echo "correlator=$correlator" >> $GITHUB_OUTPUT
 
       - name: SBOM upload
-        uses: advanced-security/spdx-dependency-submission-action@v0.2.0
+        uses: advanced-security/spdx-dependency-submission-action@v0.3.2
         with:
           filePath: "${{ matrix.sbom }}"
           correlator: ${{ steps.matrix_parser.outputs.correlator }}
