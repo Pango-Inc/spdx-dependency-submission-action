@@ -1,6 +1,6 @@
 {
   "name": "spdx-to-dependency-graph-action",
-  "version": "0.3.2",
+  "version": "0.4.0-pango.1",
   "description": "SPDX to Dependency Graph Action",
   "type": "module",
   "main": "index.js",

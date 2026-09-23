@@ -55640,7 +55640,7 @@ async function submitSnapshot(snapshot, context) {
 
 
 
-const index_VERSION = "0.3.2";
+const index_VERSION = "0.4.0-pango.1";
 
 async function run() {
   const files = searchFiles();
@@ -55651,7 +55651,10 @@ async function run() {
   let snapshot = new l({
     name: "spdx-to-dependency-graph-action",
     version: index_VERSION,
-    url: "https://github.com/advanced-security/spdx-dependency-submission-action",
+    // This fork, not upstream: the detector URL is where someone lands when a submitted
+    // graph looks wrong, and the classification differences that would send them there
+    // are ours.
+    url: "https://github.com/Pango-Inc/spdx-dependency-submission-action",
   },
     submissionContext,
     {
